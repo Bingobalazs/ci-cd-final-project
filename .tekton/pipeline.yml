@@ -1,0 +1,104 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: cd-pipeline
+spec:
+  workspaces:
+    - name: output
+  params:
+    - name: repo-url
+      type: string
+      description: The URL of the git repository to build
+    - name: branch
+      type: string
+      default: main
+    - name: build-image
+      type: string
+      description: The full name of the image to build and deploy
+    - name: app-name
+      type: string
+      default: cd-app
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      runAfter:
+        - cleanup
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.branch)
+        - name: deleteExisting
+          value: "true"
+
+    - name: flake8
+      taskRef:
+        name: flake8
+      runAfter:
+        - git-clone
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: image
+          value: python:3.9-slim
+        - name: path
+          value: service
+        - name: args
+          value:
+            - "--count"
+            - "--max-complexity=10"
+            - "--max-line-length=127"
+            - "--statistics"
+
+    - name: nose
+      taskRef:
+        name: nose
+      runAfter:
+        - flake8
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: args
+          value: "-v"
+
+    - name: buildah
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      runAfter:
+        - nose
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: IMAGE
+          value: $(params.build-image)
+        - name: TLSVERIFY
+          value: "false"
+
+    - name: deploy
+      taskRef:
+        name: openshift-client
+        kind: ClusterTask
+      runAfter:
+        - buildah
+      params:
+        - name: SCRIPT
+          value: |
+            echo "Deploying $(params.app-name)"
+            oc create deployment $(params.app-name) --image=$(params.build-image) --dry-run=client -o yaml | oc apply -f -
